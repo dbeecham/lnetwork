@@ -59,7 +59,7 @@ CFLAGS         = -Iinclude -Iinc -Isrc -Wall -Wextra \
 				 -Wno-unused-parameter -Wno-unused-variable \
                  -Wl,-z,relro $(cflags-y) $(EXTRA_CFLAGS)
 LDFLAGS        = $(ldflags-y) $(EXTRA_LDFLAGS)
-LDLIBS         = $(ldlibs-y) $(EXTRA_LDLIBS)
+LDLIBS         = -lsqlite3 $(ldlibs-y) $(EXTRA_LDLIBS)
 DESTDIR        = /
 PREFIX         = /usr/local
 RAGEL          = ragel

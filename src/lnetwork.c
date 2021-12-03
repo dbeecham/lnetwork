@@ -343,12 +343,94 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     char topic[512];
     int topic_len = 0;
     int bytes_written = 0;
+    sqlite3_stmt * stmt;
 
     // get the name of the interface
     if (NULL == if_indextoname(ifa->ifa_index, ifname)) {
         syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
     }
+
+    // get ip as a printable string
+    if (NULL == inet_ntop(AF_INET6, in6_addr, addr, INET6_ADDRSTRLEN)) {
+        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
+        return -1;
+    }
+
+
+
+    // for now, just don't handle temporary addresses. TODO: create a new table
+    // for temporaries, or do something smart with them.
+    if (IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
+        return 0;
+    }
+
+
+
+    // prepare sqlite3 statement
+    const char sql[] = "insert into ipv6(ifid, ifname, ipv6addr) values (?,?,?) on conflict(ifid,ipv6addr) do nothing returning ifname, ipv6addr";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifa->ifa_index
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifname
+    ret = sqlite3_bind_text(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* text = */ ifname,
+        /* text_len = */ sizeof(ifname),
+        /* mem_cb = */ SQLITE_STATIC
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ipv6addr
+    ret = sqlite3_bind_text(
+        /* stmt = */ stmt,
+        /* index = */ 3,
+        /* text = */ addr,
+        /* text_len = */ sizeof(addr),
+        /* mem_cb = */ SQLITE_STATIC
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new ip address, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW == ret) {
+        // this is a new address, let's notify people.
+    }
+
 
     topic_len = snprintf(topic, sizeof(topic), "host.%.*s.lnetwork.%s.out", lnetwork->hostname_len, lnetwork->hostname, ifname);
     if (-1 == topic_len) {
@@ -357,11 +439,6 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     }
 
 
-    // get ip as a printable string
-    if (NULL == inet_ntop(AF_INET6, in6_addr, addr, INET6_ADDRSTRLEN)) {
-        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
-    }
 
     payload_len = snprintf(payload, sizeof(payload), "{\"address\":\"%s\"", addr);
     if (-1 == payload_len) {
@@ -396,16 +473,16 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     }
 
 
-    if (RT_SCOPE_UNIVERSE == (RT_SCOPE_UNIVERSE & ifa->ifa_scope)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"global\"");
+    if (RT_SCOPE_LINK == (RT_SCOPE_LINK & ifa->ifa_scope)) {
+        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"link\"");
         if (-1 == bytes_written) {
             syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
             return -1;
         }
         payload_len += bytes_written;
     }
-    else if (RT_SCOPE_LINK == (RT_SCOPE_LINK & ifa->ifa_scope)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"link\"");
+    else if (RT_SCOPE_UNIVERSE == (RT_SCOPE_UNIVERSE & ifa->ifa_scope)) {
+        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"global\"");
         if (-1 == bytes_written) {
             syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
             return -1;
@@ -1034,8 +1111,6 @@ int lnetwork_epoll_event_nats_connected (
     int bytes_read = 0;
     uint8_t buf[2048];
 
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     bytes_read = read(event->data.fd, buf, sizeof(buf));
     if (-1 == ret) {
         syslog(LOG_ERR, "%s:%d:%s: read: %s", __FILE__, __LINE__, __func__, strerror(errno));
@@ -1341,7 +1416,41 @@ int lnetwork_hostname_init (
 
     lnetwork->hostname_len = ret;
 
-    syslog(LOG_INFO, "%s:%d:%s: hostname: %.*s", __FILE__, __LINE__, __func__, lnetwork->hostname_len, lnetwork->hostname);
+    return 0;
+}
+
+
+int lnetwork_init_sqlite (
+    struct lnetwork_s * lnetwork
+)
+{
+
+    int ret = 0;
+    char * err = NULL;
+
+    // open sqlite database 
+    ret = sqlite3_open_v2(
+        /* path = */ "lnetwork.sqlite",
+        /* db = */ &lnetwork->db,
+        /* flags = */ SQLITE_OPEN_READWRITE | SQLITE_OPEN_MEMORY,
+        /* vfs = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_open_v2 returned %d", __FILE__, __LINE__, __func__, ret);
+        return -1;
+    }
+
+    ret = sqlite3_exec(
+        /* db = */ lnetwork->db,
+        /* sqlite = */ sqlite_schema,
+        /* cb = */ NULL,
+        /* user_data = */ NULL,
+        /* err = */ &err
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s", __FILE__, __LINE__, __func__, ret, err);
+        return -1;
+    }
 
     return 0;
 }
@@ -1360,6 +1469,12 @@ int main (
     ret = lnetwork_init(&lnetwork);
     if (-1 == ret) {
         syslog(LOG_ERR, "%s:%d:%s: lnetwork_init returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    ret = lnetwork_init_sqlite(&lnetwork);
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: lnetwork_init_sqlite returned -1", __FILE__, __LINE__, __func__);
         return -1;
     }
 

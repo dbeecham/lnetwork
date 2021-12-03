@@ -20,6 +20,7 @@
       ];
 
       buildInputs = [ 
+        nixpkgs.legacyPackages.x86_64-linux.sqlite
       ];
 
       installFlags = [ "DESTDIR=$(out)" "PREFIX=/" ];

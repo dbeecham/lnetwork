@@ -1,0 +1,4 @@
+*.o
+lnetwork
+*.swp
+.ccls-cache
