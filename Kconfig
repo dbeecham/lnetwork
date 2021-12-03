@@ -1,0 +1,41 @@
+mainmenu "example"
+
+config BUILD_DEBUG
+    bool "Build with -DDEBUG"
+    default n
+
+menuconfig OPTIMIZE
+    bool "Enable optimization compile flags"
+    default y
+
+choice 
+    prompt "Optimization"
+    depends on OPTIMIZE
+    config OPTIMIZE_SMALL
+        bool "-Os"
+    config OPTIMIZE_DEBUG
+        bool "-Og -g3"
+endchoice
+
+
+menu "NATS host"
+    config NATS_HOST
+        string "NATS hosts"
+        default "127.0.0.1"
+
+    config NATS_PORT
+        string "NATS port"
+        default "4222"
+endmenu
+
+menu "NATS timeouts"
+
+    config NATS_CONNECT_TIMEOUT_S
+        int "Connect timeout (seconds)"
+        default 3
+
+    config NATS_TIMEOUT_S
+        int "Data timeout (seconds)"
+        default 150
+
+endmenu
