@@ -24,23 +24,23 @@
 
 int pub (
     struct lnetwork_s * lnetwork,
-    const char * topic,
+    const uint8_t * topic,
     const uint32_t topic_len,
-    const char * rt,
+    const uint8_t * rt,
     const uint32_t rt_len,
-    const char * payload,
+    const uint8_t * payload,
     const uint32_t payload_len
 )
 {
     int buf_len = 0;
     int bytes_written = 0;
-    char buf[4096];
+    char buf[65536];
 
     if (0 == rt_len) {
-        buf_len = snprintf(buf, 4096, "PUB %.*s %d\r\n", 
+        buf_len = snprintf(buf, sizeof(buf), "PUB %.*s %d\r\n", 
                 topic_len, topic, payload_len);
     } else {
-        buf_len = snprintf(buf, 4096, "PUB %.*s %.*s %d\r\n", 
+        buf_len = snprintf(buf, sizeof(buf), "PUB %.*s %.*s %d\r\n", 
                 topic_len, topic, rt_len, rt, payload_len);
     }
 
@@ -291,8 +291,9 @@ int lnetwork_epoll_event_netlink_deladdr_ipv6 (
 
     // get the name of the interface
     if (NULL == if_indextoname(ifa->ifa_index, name)) {
+        #warning TODO: interface has been removed if errno is ENOIO
         syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
+        //return -1;
     }
 
     // get ip as a printable string
@@ -559,10 +560,11 @@ int lnetwork_epoll_event_netlink_deladdr_ipv4 (
     char name[IFNAMSIZ];
 
     if (NULL == if_indextoname(ifa->ifa_index, name)) {
+        #warning TODO: interface has been removed if errno is ENOIO
         syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
+        //return -1;
     }
-    if (NULL == inet_ntop(AF_INET6, in_addr, addr, INET_ADDRSTRLEN)) {
+    if (NULL == inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN)) {
         syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
     }
@@ -1304,12 +1306,14 @@ int lnetwork_init (
 }
 
 
-int lnetwork_nats_info_cb (
+int lnetwork_nats_event_info (
     void * user_data
 )
 {
 
     int ret = 0;
+    uint8_t topic[256];
+    int topic_len = 0;
 
     struct lnetwork_s * lnetwork = user_data;
     if (LNETWORK_SENTINEL != lnetwork->sentinel) {
@@ -1317,11 +1321,28 @@ int lnetwork_nats_info_cb (
         return -1;
     }
 
+    topic_len = snprintf((char*)topic, sizeof(topic), "host.%.*s.lnetwork.request", lnetwork->hostname_len, lnetwork->hostname);
+    if (-1 == topic_len) {
+        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    ret = sub(
+        /* lnetwork = */ lnetwork,
+        /* topic = */ (const char *)topic,
+        /* topic_len = */ topic_len,
+        /* sid = */ 1
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sub returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
     return 0;
 }
 
 
-int lnetwork_nats_ping_cb (
+int lnetwork_nats_event_ping (
     void * user_data
 )
 {
@@ -1348,6 +1369,57 @@ int lnetwork_nats_ping_cb (
 }
 
 
+int lnetwork_nats_event_request (
+    void * user_data,
+    const uint8_t * rt_topic,
+    uint32_t rt_topic_len
+)
+{
+    int ret = 0;
+    int bytes_written = 0;
+    unsigned char * db_p = NULL;
+    sqlite3_int64 db_size = 0;
+
+    struct lnetwork_s * lnetwork = user_data;
+    if (LNETWORK_SENTINEL != lnetwork->sentinel) {
+        syslog(LOG_ERR, "%s:%d:%s: sentinel is wrong", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: got request", __FILE__, __LINE__, __func__);
+
+    db_p = sqlite3_serialize(
+        /* sqlite3 = */ lnetwork->db,
+        /* db = */ "main",
+        /* size = */ &db_size,
+        /* flags = */ 0
+    );
+    if (NULL == db_p) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_serialize returned NULL: %s", __FILE__, __LINE__, __func__, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+    if (db_size <= 0) {
+        syslog(LOG_ERR, "%s:%d:%s: db_size=%lld", __FILE__, __LINE__, __func__, db_size);
+    }
+
+    ret = pub(
+        /* lnetwork = */ lnetwork,
+        /* topic = */ rt_topic,
+        /* topic_len = */ rt_topic_len,
+        /* rt = */ NULL,
+        /* rt_len = */ 0,
+        /* payload = */ db_p,
+        /* payload_len = */ (uint32_t)db_size
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: pub returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    return 0;
+}
+
+
 int lnetwork_nats_connect (
     struct lnetwork_s * lnetwork
 )
@@ -1358,8 +1430,9 @@ int lnetwork_nats_connect (
     // initialize the parser
     ret = lnetwork_nats_parser_init(
         /* parser = */ &lnetwork->nats.parser,
-        /* info_cb = */ lnetwork_nats_info_cb,
-        /* ping_cb = */ lnetwork_nats_ping_cb,
+        /* info_cb = */ lnetwork_nats_event_info,
+        /* ping_cb = */ lnetwork_nats_event_ping,
+        /* lnetwork_request_cb = */ lnetwork_nats_event_request,
         /* user_data = */ lnetwork
     );
     if (-1 == ret) {

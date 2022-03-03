@@ -91,11 +91,11 @@ NO_COLOR       = \033[m
 # Kconfig configurable flags #
 ##############################
 
-cflags-$(CONFIG_OPTIMIZE_DEBUG) += -Og -g3
-ldflags-$(CONFIG_OPTIMIZE_DEBUG) += -Og -g3
+cflags-$(CONFIG_OPTIMIZE_DEBUG) += -O0 -g3
+ldflags-$(CONFIG_OPTIMIZE_DEBUG) += -O0 -g3
 
-cflags-$(CONFIG_OPTIMIZE_SMALL) += -Og -g3
-ldflags-$(CONFIG_OPTIMIZE_SMALL) += -Og -g3
+cflags-$(CONFIG_OPTIMIZE_SMALL) += -Os
+ldflags-$(CONFIG_OPTIMIZE_SMALL) += -Os
 
 cflags-$(CONFIG_BUILD_DEBUG) += -DDEBUG
 
@@ -112,11 +112,11 @@ cflags-y += -DCONFIG_NUM_TIMERS='$(CONFIG_NUM_TIMERS)'
 endif
 
 ifdef CONFIG_NATS_CONNECT_TIMEOUT_S
-cflags-y += -CONFIG_NATS_CONNNECT_TIMEOUT_S='$(CONFIG_NATS_CONNECT_TIMEOUT_S)'
+cflags-y += -DCONFIG_NATS_CONNNECT_TIMEOUT_S='$(CONFIG_NATS_CONNECT_TIMEOUT_S)'
 endif
 
 ifdef CONFIG_NATS_TIMEOUT_S
-cflags-y += -CONFIG_NATS_TIMEOUT_S='$(CONFIG_NATS_TIMEOUT_S)'
+cflags-y += -DCONFIG_NATS_TIMEOUT_S='$(CONFIG_NATS_TIMEOUT_S)'
 endif
 
 
