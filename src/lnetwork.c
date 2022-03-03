@@ -1,6 +1,7 @@
 #define _DEFAULT_SOURCE
 
 #include <asm/types.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <syslog.h>
 #include <string.h>
@@ -155,6 +156,188 @@ int request (
 }
 
 
+int lnetwork_interface_add (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
+
+    // prepare sqlite3 statement
+    const char sql[] = "insert into interfaces(ifid) values (?) on conflict do nothing returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new ip address, no need to notify anyone.
+        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        sqlite3_finalize(stmt);
+        return -1;
+        // this is a new address, let's notify people.
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_name (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    const char * ifname
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
+
+    // prepare sqlite3 statement
+    const char sql[] = "insert into names(ifid, ifname) values (?,?) on conflict do nothing returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_text(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* text = */ ifname,
+        /* text_len = */ strlen(ifname),
+        /* mem_cb = */ SQLITE_STATIC
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_remove (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid
+)
+{
+
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
+
+    // prepare sqlite3 statement
+    const char sql[] = "delete from interfaces where ifid=? returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new ip address, no need to notify anyone.
+        syslog(LOG_DEBUG, "%s:%d:%s: it wasnt in the database", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        sqlite3_finalize(stmt);
+        return -1;
+        // this is a new address, let's notify people.
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: ok deleted", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
+
 int lnetwork_epoll_event_netlink_newlink (
     struct lnetwork_s * lnetwork,
     struct epoll_event * event,
@@ -162,15 +345,82 @@ int lnetwork_epoll_event_netlink_newlink (
     uint32_t ifi_len
 )
 {
+    int ret = 0;
+    char name[IFNAMSIZ];
 
     // this is called when an interface gets link info, but its also called
     // when link is removed from an interface. You need to check the flags to
-    // see what state it's in.
+    // see what state it's in. It's also called when a new interface is added.
 
-    //struct rtattr * rt = IFA_RTA(
 
-    syslog(LOG_INFO, "%s:%d:%s: interface %d just got link, type=%d, flags=%d, family=%d",
-            __FILE__, __LINE__, __func__, ifi->ifi_index, ifi->ifi_type, ifi->ifi_flags, ifi->ifi_family);
+    // interface may already have been removed, so this can fail.
+    if (NULL == if_indextoname(ifi->ifi_index, name)) {
+        if (ENXIO == errno) {
+            ret = lnetwork_interface_remove(lnetwork, ifi->ifi_index);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_remove returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
+            return 0;
+        }
+
+        syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
+        return -1;
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: interface %d (%s) just got link, type=%d, flags=%d, family=%d",
+            __FILE__, __LINE__, __func__, ifi->ifi_index, name, ifi->ifi_type, ifi->ifi_flags, ifi->ifi_family);
+
+    for (struct rtattr * attr = IFLA_RTA(ifi); RTA_OK(attr, ifi_len); attr = RTA_NEXT(attr, ifi_len)) {
+        syslog(LOG_INFO, "%s:%d:%s: hi, type=%d", __FILE__, __LINE__, __func__, attr->rta_type);
+        if (IFLA_UNSPEC == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: unspec", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_ADDRESS == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: address", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_BROADCAST == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: broadcast", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_IFNAME == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: ifname", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_MTU == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: mtu", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_LINK == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: link", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_QDISC == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: qdisc", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_STATS == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: stats", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_AF_SPEC == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: af_spec", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_GROUP == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: group", __FILE__, __LINE__, __func__);
+        }
+        if (IFLA_PROMISCUITY == attr->rta_type) {
+            syslog(LOG_INFO, "%s:%d:%s: promiscuity", __FILE__, __LINE__, __func__);
+        }
+    }
+
+
+    ret = lnetwork_interface_add(lnetwork, ifi->ifi_index);
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    ret = lnetwork_interface_add_name(lnetwork, ifi->ifi_index, name);
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_name returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
 
     if (IFF_UP == (IFF_UP & ifi->ifi_flags)) {
         syslog(LOG_INFO, "%s:%d:%s: its up", __FILE__, __LINE__, __func__);
@@ -228,10 +478,55 @@ int lnetwork_epoll_event_netlink_dellink (
     // the device was removed entirely from the device (e.g. unplugged a USB
     // ethernet device, or called 'ip link del veth').
 
+    char name[IFNAMSIZ];
     int ret = 0;
+
+    ret = lnetwork_interface_remove(lnetwork, ifi->ifi_index);
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_remove returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+    if (1 == ret) {
+        syslog(LOG_INFO, "%s:%d:%s: it was removed", __FILE__, __LINE__, __func__);
+        return 0;
+    }
+
+    return 0;
 
     syslog(LOG_INFO, "%s:%d:%s: interface %d just got removed, type=%d, flags=%d, family=%d",
             __FILE__, __LINE__, __func__, ifi->ifi_index, ifi->ifi_type, ifi->ifi_flags, ifi->ifi_family);
+
+    if (IFLA_UNSPEC == (IFLA_UNSPEC & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_UNSPEC", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_ADDRESS == (IFLA_ADDRESS & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_ADDRESS", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_BROADCAST == (IFLA_BROADCAST & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_BROADCAST", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_IFNAME == (IFLA_IFNAME & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_IFNAME", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_MTU == (IFLA_MTU & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_MTU", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_LINK == (IFLA_LINK & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_LINK", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_QDISC == (IFLA_QDISC & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_QDISC", __FILE__, __LINE__, __func__);
+    }
+
+    if (IFLA_STATS == (IFLA_STATS & ifi->ifi_type)) {
+        syslog(LOG_INFO, "%s:%d:%s: IFLA_STATS", __FILE__, __LINE__, __func__);
+    }
 
     if (IFF_UP == (IFF_UP & ifi->ifi_flags)) {
         syslog(LOG_INFO, "%s:%d:%s: its up", __FILE__, __LINE__, __func__);
@@ -345,11 +640,13 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     int bytes_written = 0;
     sqlite3_stmt * stmt;
 
+
     // get the name of the interface
     if (NULL == if_indextoname(ifa->ifa_index, ifname)) {
         syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
     }
+
 
     // get ip as a printable string
     if (NULL == inet_ntop(AF_INET6, in6_addr, addr, INET6_ADDRSTRLEN)) {
@@ -368,7 +665,7 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
 
 
     // prepare sqlite3 statement
-    const char sql[] = "insert into ipv6(ifid, ifname, ipv6addr) values (?,?,?) on conflict(ifid,ipv6addr) do nothing returning ifname, ipv6addr";
+    const char sql[] = "insert into ipv6(ifid, ipv6addr) values (?,?) on conflict(ifid,ipv6addr) do nothing returning ifid";
     ret = sqlite3_prepare_v3(
         /* db = */ lnetwork->db,
         /* sql = */ sql,
@@ -395,17 +692,17 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     }
 
     // bind ifname
-    ret = sqlite3_bind_text(
-        /* stmt = */ stmt,
-        /* index = */ 2,
-        /* text = */ ifname,
-        /* text_len = */ sizeof(ifname),
-        /* mem_cb = */ SQLITE_STATIC
-    );
-    if (-1 == ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
-        return -1;
-    }
+//    ret = sqlite3_bind_text(
+//        /* stmt = */ stmt,
+//        /* index = */ 2,
+//        /* text = */ ifname,
+//        /* text_len = */ sizeof(ifname),
+//        /* mem_cb = */ SQLITE_STATIC
+//    );
+//    if (-1 == ret) {
+//        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+//        return -1;
+//    }
 
     // bind ipv6addr
     ret = sqlite3_bind_text(
@@ -424,15 +721,17 @@ int lnetwork_epoll_event_netlink_newaddr_ipv6 (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new ip address, no need to notify anyone.
+        syslog(LOG_INFO, "%s:%d:%s: its an old ipv6 addr", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW == ret) {
+        syslog(LOG_INFO, "%s:%d:%s: it's a new ipv6 addr", __FILE__, __LINE__, __func__);
         // this is a new address, let's notify people.
     }
 
 
-    topic_len = snprintf(topic, sizeof(topic), "host.%.*s.lnetwork.%s.out", lnetwork->hostname_len, lnetwork->hostname, ifname);
+    topic_len = snprintf(topic, sizeof(topic), "lnetwork.%.*s.interface.%s.out", lnetwork->hostname_len, lnetwork->hostname, ifname);
     if (-1 == topic_len) {
         syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
         return -1;
@@ -527,13 +826,27 @@ int lnetwork_epoll_event_netlink_newaddr_ipv4 (
     struct in_addr * in_addr
 )
 {
+    int ret = 0;
     char addr[INET_ADDRSTRLEN];
     char name[IFNAMSIZ];
 
     if (NULL == if_indextoname(ifa->ifa_index, name)) {
+
+        // interface has already been removed; delete it from the database.
+        if (ENXIO == errno) {
+            ret = lnetwork_interface_remove(lnetwork, ifa->ifa_index);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_remove returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
+            return 0;
+        }
+
         syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
     }
+
+    
     if (NULL == inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN)) {
         syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
@@ -555,20 +868,23 @@ int lnetwork_epoll_event_netlink_deladdr_ipv4 (
     struct in_addr * in_addr
 )
 {
+    // this function can also be called when an interface is removed, so we
+    // can't be sure that we can call if_indextoname just yet.
+
     char addr[INET_ADDRSTRLEN];
     char name[IFNAMSIZ];
 
-    if (NULL == if_indextoname(ifa->ifa_index, name)) {
-        syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
-    }
-    if (NULL == inet_ntop(AF_INET6, in_addr, addr, INET_ADDRSTRLEN)) {
+//    if (NULL == if_indextoname(ifa->ifa_index, name)) {
+//        syslog(LOG_ERR, "%s:%d:%s: if_indextoname: %s", __FILE__, __LINE__, __func__, strerror(errno));
+//        return -1;
+//    }
+    if (NULL == inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN)) {
         syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: interface %d (%s) just lost addr %s",
-            __FILE__, __LINE__, __func__, ifa->ifa_index, name, addr);
+    syslog(LOG_INFO, "%s:%d:%s: interface %d just lost addr %s",
+            __FILE__, __LINE__, __func__, ifa->ifa_index, addr);
 
     return 0;
 }
@@ -1304,7 +1620,7 @@ int lnetwork_init (
 }
 
 
-int lnetwork_nats_info_cb (
+int lnetwork_nats_event_info (
     void * user_data
 )
 {
@@ -1321,7 +1637,7 @@ int lnetwork_nats_info_cb (
 }
 
 
-int lnetwork_nats_ping_cb (
+int lnetwork_nats_event_ping (
     void * user_data
 )
 {
@@ -1358,8 +1674,8 @@ int lnetwork_nats_connect (
     // initialize the parser
     ret = lnetwork_nats_parser_init(
         /* parser = */ &lnetwork->nats.parser,
-        /* info_cb = */ lnetwork_nats_info_cb,
-        /* ping_cb = */ lnetwork_nats_ping_cb,
+        /* info_cb = */ lnetwork_nats_event_info,
+        /* ping_cb = */ lnetwork_nats_event_ping,
         /* user_data = */ lnetwork
     );
     if (-1 == ret) {
@@ -1442,6 +1758,18 @@ int lnetwork_init_sqlite (
 
     ret = sqlite3_exec(
         /* db = */ lnetwork->db,
+        /* sqlite = */ "pragma foreign_keys=1;",
+        /* cb = */ NULL,
+        /* user_data = */ NULL,
+        /* err = */ &err
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s", __FILE__, __LINE__, __func__, ret, err);
+        return -1;
+    }
+
+    ret = sqlite3_exec(
+        /* db = */ lnetwork->db,
         /* sqlite = */ sqlite_schema,
         /* cb = */ NULL,
         /* user_data = */ NULL,
@@ -1464,7 +1792,7 @@ int main (
     int ret = 0;
     struct lnetwork_s lnetwork = {0};
 
-    openlog("lnetwork", LOG_CONS | LOG_PID, LOG_USER);
+    openlog("lnetwork", LOG_NDELAY | LOG_PERROR, LOG_USER);
 
     ret = lnetwork_init(&lnetwork);
     if (-1 == ret) {
