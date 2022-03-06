@@ -49,7 +49,7 @@
 #   compatibility with future library versions, so for long-term use across multiple OSs, this
 #   can have unforseen consequences
 # -O0 may improve debugging experience, but disables any hardening that depend on optimizations.
-CFLAGS         = -Iinclude -Iinc -Isrc -Wall -Wextra \
+CFLAGS         = -Iinclude -O0 -g3 -Iinc -Isrc -Wall -Wextra \
                  -Wno-implicit-fallthrough -Wno-unused-const-variable \
                  -std=c11 -D_FORTIFY_SOURCE=2 -fexceptions \
                  -fasynchronous-unwind-tables -fpie -Wl,-pie \
@@ -57,9 +57,9 @@ CFLAGS         = -Iinclude -Iinc -Isrc -Wall -Wextra \
                  -Werror=format-security \
                  -Werror=implicit-function-declaration -Wl,-z,defs -Wl,-z,now \
 				 -Wno-unused-parameter -Wno-unused-variable \
-                 -Wl,-z,relro $(cflags-y) $(EXTRA_CFLAGS)
-LDFLAGS        = $(ldflags-y) $(EXTRA_LDFLAGS)
-LDLIBS         = -lsqlite3 $(ldlibs-y) $(EXTRA_LDLIBS)
+                 -Wl,-z,relro $(shell pkg-config --cflags libnl-3.0) $(cflags-y) $(EXTRA_CFLAGS)
+LDFLAGS        = -O0 -g3 $(ldflags-y) $(EXTRA_LDFLAGS)
+LDLIBS         = -lsqlite3 $(shell pkg-config --libs libnl-3.0) $(ldlibs-y) $(EXTRA_LDLIBS)
 DESTDIR        = /
 PREFIX         = /usr/local
 RAGEL          = ragel
@@ -112,11 +112,11 @@ cflags-y += -DCONFIG_NUM_TIMERS='$(CONFIG_NUM_TIMERS)'
 endif
 
 ifdef CONFIG_NATS_CONNECT_TIMEOUT_S
-cflags-y += -CONFIG_NATS_CONNNECT_TIMEOUT_S='$(CONFIG_NATS_CONNECT_TIMEOUT_S)'
+cflags-y += -DCONFIG_NATS_CONNNECT_TIMEOUT_S='$(CONFIG_NATS_CONNECT_TIMEOUT_S)'
 endif
 
 ifdef CONFIG_NATS_TIMEOUT_S
-cflags-y += -CONFIG_NATS_TIMEOUT_S='$(CONFIG_NATS_TIMEOUT_S)'
+cflags-y += -DCONFIG_NATS_TIMEOUT_S='$(CONFIG_NATS_TIMEOUT_S)'
 endif
 
 

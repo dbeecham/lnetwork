@@ -30,6 +30,10 @@
 #define LNETWORK_EPOLLFD_SENTINEL 8082
 
 
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
+
+
 static const char sqlite_schema[] =
     "begin;"
     "create table interfaces ("
@@ -42,16 +46,39 @@ static const char sqlite_schema[] =
         "primary key (ifid),"
         "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
     ") without rowid;"
+    "create table hwaddr ("
+        "ifid int not null,"
+        "hwaddr text not null unique check (length(hwaddr)<=64) check (length(hwaddr)>0),"
+        "primary key (ifid),"
+        "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
+    ") without rowid;"
     "create table ipv6 ("
         "ifid int not null,"
-        "ipv6addr text not null unique check (length(ipv6addr)<=128),"
+        "ipv6addr text not null unique check (length(ipv6addr)<=" STR(INET6_ADDRSTRLEN) "),"
         "primary key (ifid, ipv6addr),"
         "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
     ") without rowid;"
     "create table ipv4 ("
         "ifid int not null,"
-        "ipv4addr text not null unique check (length(ipv4addr)<=128),"
+        "ipv4addr text not null unique check (length(ipv4addr)<=" STR(INET_ADDRSTRLEN) "),"
         "primary key (ifid, ipv4addr),"
+        "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
+    ") without rowid;"
+    "create table mtu ("
+        "ifid int not null,"
+        "mtu int not null,"
+        "primary key (ifid),"
+        "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
+    ") without rowid;"
+    "create table txqlen ("
+        "ifid int not null,"
+        "txqlen int not null,"
+        "primary key (ifid),"
+        "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
+    ") without rowid;"
+    "create table promisuous ("
+        "ifid int not null,"
+        "primary key (ifid),"
         "foreign key (ifid) references interfaces(ifid) on delete cascade on update cascade"
     ") without rowid;"
     "pragma user_version = 1;"
@@ -72,4 +99,6 @@ struct lnetwork_s {
         struct addrinfo * servinfo;
         struct addrinfo * servinfo_p;
     } nats;
+    bool queried_link;
+    bool queried_addr;
 };

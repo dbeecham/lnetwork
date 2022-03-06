@@ -17,10 +17,12 @@
       depsBuildBuild = [
         nixpkgs.legacyPackages.x86_64-linux.ragel
         nixpkgs.legacyPackages.x86_64-linux.kconfig-frontends
+        nixpkgs.legacyPackages.x86_64-linux.pkgconfig
       ];
 
       buildInputs = [ 
         nixpkgs.legacyPackages.x86_64-linux.sqlite
+        nixpkgs.legacyPackages.x86_64-linux.libnl
       ];
 
       installFlags = [ "DESTDIR=$(out)" "PREFIX=/" ];
