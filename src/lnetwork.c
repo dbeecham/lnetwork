@@ -17,6 +17,7 @@
 #include <sys/timerfd.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <sys/uio.h>
 
 #include <netlink/attr.h>
 #include <netlink/msg.h>
@@ -67,13 +68,24 @@ int pub (
                 topic_len, topic, rt_len, rt, payload_len);
     }
 
-    memcpy(buf + buf_len, payload, payload_len);
-    buf_len += payload_len;
-    memcpy(buf + buf_len, "\r\n", 2);
-    buf_len += 2;
-
-
-    bytes_written = write(lnetwork->nats.fd, buf, buf_len);
+    bytes_written = writev(
+        /* fd = */ lnetwork->nats.fd,
+        /* iov = */ (struct iovec[]) {
+            {
+                .iov_base = buf,
+                .iov_len = buf_len
+            },
+            {
+                .iov_base = payload,
+                .iov_len = payload_len
+            },
+            {
+                .iov_base = "\r\n",
+                .iov_len = 2
+            }
+        },
+        /* iov_len = */ 3
+    );
     if (-1 == bytes_written) {
         syslog(LOG_ERR, "%s:%d:%s: write: %s", __FILE__, __LINE__, __func__, strerror(errno));
         return -1;
@@ -82,8 +94,8 @@ int pub (
         syslog(LOG_ERR, "%s:%d:%s: connection closed", __FILE__, __LINE__, __func__);
         return -1;
     }
-    if (buf_len != bytes_written) {
-        syslog(LOG_ERR, "%s:%d:%s: partial write!", __FILE__, __LINE__, __func__);
+    if (buf_len + payload_len + 2 != bytes_written) {
+        syslog(LOG_ERR, "%s:%d:%s: partial write! wrote %d bytes, expected %d", __FILE__, __LINE__, __func__, bytes_written, buf_len + payload_len + 2);
         return -1;
     }
 
@@ -182,8 +194,6 @@ int lnetwork_netlink_query_link (
     struct lnetwork_s * lnetwork
 )
 {
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     struct {
         struct nlmsghdr nlmsghdr;
         struct ifinfomsg ifi;
@@ -223,8 +233,6 @@ int lnetwork_netlink_query_addr (
     struct lnetwork_s * lnetwork
 )
 {
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     struct {
         struct nlmsghdr nlmsghdr;
         struct ifinfomsg ifi;
@@ -268,8 +276,6 @@ int lnetwork_interface_add (
     int ret = 0;
     sqlite3_stmt * stmt;
 
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     // prepare sqlite3 statement
     const char sql[] = "insert into interfaces(ifid) values (?) on conflict do nothing returning ifid;";
     ret = sqlite3_prepare_v3(
@@ -299,18 +305,16 @@ int lnetwork_interface_add (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new ip address, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
         // this is a new address, let's notify people.
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -326,10 +330,8 @@ int lnetwork_interface_add_name (
     int ret = 0;
     sqlite3_stmt * stmt;
 
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     // prepare sqlite3 statement
-    const char sql[] = "insert into names(ifid, ifname) values (?,?) on conflict do nothing returning ifid;";
+    const char sql[] = "insert into names(ifid, ifname) values (?,?) on conflict do update set ifname=excluded.ifname returning ifid;";
     ret = sqlite3_prepare_v3(
         /* db = */ lnetwork->db,
         /* sql = */ sql,
@@ -369,17 +371,15 @@ int lnetwork_interface_add_name (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -388,14 +388,12 @@ int lnetwork_interface_add_name (
 int lnetwork_interface_add_hwaddr (
     struct lnetwork_s * lnetwork,
     unsigned int ifid,
-    const uint8_t * hwaddr,
+    const char * hwaddr,
     int hwaddr_len
 )
 {
     int ret = 0;
     sqlite3_stmt * stmt;
-
-    syslog(LOG_DEBUG, "%s:%d:%s: hi! hwaddr_len=%d", __FILE__, __LINE__, __func__, hwaddr_len);
 
     // prepare sqlite3 statement
     const char sql[] = "insert into hwaddr(ifid, hwaddr) values (?,?) on conflict do update set hwaddr=excluded.hwaddr returning ifid;";
@@ -426,7 +424,7 @@ int lnetwork_interface_add_hwaddr (
     ret = sqlite3_bind_text(
         /* stmt = */ stmt,
         /* index = */ 2,
-        /* text = */ hwaddr,
+        /* text = */ (const char *)hwaddr,
         /* text_len = */ hwaddr_len,
         /* mem_cb = */ SQLITE_STATIC
     );
@@ -448,7 +446,72 @@ int lnetwork_interface_add_hwaddr (
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_perm_addr (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    const char * perm_addr,
+    int perm_addr_len
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+    const char sql[] = "insert into perm_addr(ifid, perm_addr) values (?,?) on conflict do update set perm_addr=excluded.perm_addr returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_text(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* text = */ (const char *)perm_addr,
+        /* text_len = */ perm_addr_len,
+        /* mem_cb = */ SQLITE_STATIC
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        syslog(LOG_DEBUG, "%s:%d:%s: no change", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -505,17 +568,15 @@ int lnetwork_interface_add_ipv6 (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -580,7 +641,7 @@ int lnetwork_interface_remove_ipv6 (
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
@@ -600,8 +661,6 @@ int lnetwork_interface_add_ipv4 (
 {
     int ret = 0;
     sqlite3_stmt * stmt;
-
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
 
     // prepare sqlite3 statement
     const char sql[] = "insert into ipv4(ifid, ipv4addr) values (?,?) on conflict do nothing returning ifid;";
@@ -644,17 +703,15 @@ int lnetwork_interface_add_ipv4 (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -719,7 +776,7 @@ int lnetwork_interface_remove_ipv4 (
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
@@ -738,8 +795,6 @@ int lnetwork_interface_add_mtu (
 {
     int ret = 0;
     sqlite3_stmt * stmt;
-
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
 
     // prepare sqlite3 statement
 #warning TODO: this needs a returning clause, but also a check for value change
@@ -781,12 +836,265 @@ int lnetwork_interface_add_mtu (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it's already in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_state (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    int state
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "insert into state(ifid, state) values (?,?) on conflict do update set state=excluded.state;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* int = */ state
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_link (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    unsigned int linked_ifid
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "insert into link(ifid, linked_ifid) values (?,?) on conflict do update set linked_ifid=excluded.linked_ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* int = */ linked_ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_min_mtu (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    int min_mtu
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "insert into min_mtu(ifid, min_mtu) values (?,?) on conflict do update set min_mtu=excluded.min_mtu;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* int = */ min_mtu
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    syslog(LOG_INFO, "%s:%d:%s: ok added!", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_max_mtu (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid,
+    int max_mtu
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "insert into max_mtu(ifid, max_mtu) values (?,?) on conflict do update set max_mtu=excluded.max_mtu;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 2,
+        /* int = */ max_mtu
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+     
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
@@ -805,8 +1113,6 @@ int lnetwork_interface_add_txqlen (
 {
     int ret = 0;
     sqlite3_stmt * stmt;
-
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
 
     // prepare sqlite3 statement
 #warning TODO: this needs a returning clause, but also a check for value change
@@ -848,12 +1154,11 @@ int lnetwork_interface_add_txqlen (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: no change", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
@@ -909,7 +1214,7 @@ int lnetwork_interface_add_promisuity (
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
@@ -927,8 +1232,6 @@ int lnetwork_interface_remove_promisuity (
 {
     int ret = 0;
     sqlite3_stmt * stmt;
-
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
 
     // prepare sqlite3 statement
 #warning TODO: this needs a returning clause, but also a check for value change
@@ -960,17 +1263,119 @@ int lnetwork_interface_remove_promisuity (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new name, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: no change", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: changed", __FILE__, __LINE__, __func__);
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_add_carrier (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "insert into carrier(ifid) values (?) on conflict do nothing returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    return 1;
+}
+
+
+int lnetwork_interface_remove_carrier (
+    struct lnetwork_s * lnetwork,
+    unsigned int ifid
+)
+{
+    int ret = 0;
+    sqlite3_stmt * stmt;
+
+    // prepare sqlite3 statement
+#warning TODO: this needs a returning clause, but also a check for value change
+    const char sql[] = "delete from carrier where ifid=? returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        // we're done - this is not a new name, no need to notify anyone.
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
     sqlite3_finalize(stmt);
     return 1;
 }
@@ -984,14 +1389,72 @@ int lnetwork_interface_remove (
 
     int ret = 0;
     sqlite3_stmt * stmt;
+    uint8_t ifname[64];
 
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
-    // prepare sqlite3 statement
-    const char sql[] = "delete from interfaces where ifid=? returning ifid;";
+    // get info on the interface to be deleted
+    const char sql[] = 
+        "select ifname from interfaces"
+        " natural left join names"
+        " where ifid = ?;";
     ret = sqlite3_prepare_v3(
         /* db = */ lnetwork->db,
         /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: no result", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    const unsigned char * db_ifname = sqlite3_column_text(stmt, 0);
+    uint32_t db_ifname_len = sqlite3_column_bytes(stmt, 0);
+    int32_t db_ifname_type = sqlite3_column_type(stmt, 0);
+
+    if (SQLITE_NULL == db_ifname_type) {
+        sqlite3_finalize(stmt);
+        syslog(LOG_ERR, "%s:%d:%s: no name on this interface in database", __FILE__, __LINE__, __func__);
+        return 0;
+    }
+    if (sizeof(ifname) < db_ifname_len) {
+        syslog(LOG_ERR, "%s:%d:%s: ifname is too large", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    memcpy(ifname, db_ifname, db_ifname_len);
+
+    sqlite3_finalize(stmt);
+
+    // prepare sqlite3 statement
+    const char select_sql[] = "delete from interfaces where ifid=? returning ifid;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ select_sql,
         /* sql_len = */ sizeof(sql),
         /* flags = */ SQLITE_PREPARE_NORMALIZE,
         /* &stmt = */ &stmt,
@@ -1017,19 +1480,32 @@ int lnetwork_interface_remove (
     ret = sqlite3_step(stmt);
     if (SQLITE_DONE == ret) {
         // we're done - this is not a new ip address, no need to notify anyone.
-        syslog(LOG_DEBUG, "%s:%d:%s: it wasnt in the database", __FILE__, __LINE__, __func__);
         sqlite3_finalize(stmt);
         return 0;
     }
     if (SQLITE_ROW != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d", __FILE__, __LINE__, __func__, ret);
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
         sqlite3_finalize(stmt);
         return -1;
         // this is a new address, let's notify people.
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: ok deleted", __FILE__, __LINE__, __func__);
     sqlite3_finalize(stmt);
+
+
+    // notify deletion event (TODO: move this out to own function)
+    char topic[128];
+    int topic_len = 0;
+
+    topic_len = snprintf(
+        topic, sizeof(topic),
+        "lnetwork.%.*s.interface.%.*s.out",
+        lnetwork->hostname_len, lnetwork->hostname,
+        db_ifname_len, ifname
+    );
+
+    ret = pub(lnetwork, topic, topic_len, NULL, 0, NULL, 0);
+
     return 0;
 }
 
@@ -1040,9 +1516,166 @@ int lnetwork_notify_interface (
 )
 {
     int ret = 0;
+    sqlite3_stmt * stmt;
+    uint8_t topic[64];
+    int topic_len = 0;
+    uint8_t payload[1024];
+    uint32_t payload_len = 0;
+    int bytes_written = 0;
 
-    syslog(LOG_INFO, "%s:%d:%s: notify interface %d", __FILE__, __LINE__, __func__, ifid);
+    // We get a lot of messages at bootup, skip those messages
+    if (false == lnetwork->queried_link || false == lnetwork->queried_addr) {
+        return 0;
+    }
 
+    const char sql[] = 
+        "select ifname, state, carrier.ifid IS NOT NULL as carrier, hwaddr from interfaces"
+        " natural left join names"
+        " natural left join state"
+        " natural left join carrier"
+        " natural left join hwaddr"
+        " where ifid = ?;";
+    ret = sqlite3_prepare_v3(
+        /* db = */ lnetwork->db,
+        /* sql = */ sql,
+        /* sql_len = */ sizeof(sql),
+        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+        /* &stmt = */ &stmt,
+        /* &sql_end = */ NULL
+    );
+    if (SQLITE_OK != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    // bind ifid
+    ret = sqlite3_bind_int(
+        /* stmt = */ stmt,
+        /* index = */ 1,
+        /* int = */ ifid
+    );
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        return -1;
+    }
+
+    ret = sqlite3_step(stmt);
+    if (SQLITE_DONE == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: no result", __FILE__, __LINE__, __func__);
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+    if (SQLITE_ROW != ret) {
+        syslog(LOG_ERR, "%s:%d:%s: sqlite3_step returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+        sqlite3_finalize(stmt);
+        return -1;
+    }
+
+    const unsigned char * ifname = sqlite3_column_text(stmt, 0);
+    uint32_t ifname_len = sqlite3_column_bytes(stmt, 0);
+    int32_t ifname_type = sqlite3_column_type(stmt, 0);
+    const sqlite3_int64 state = sqlite3_column_int(stmt, 1);
+    int32_t state_type = sqlite3_column_type(stmt, 1);
+    const sqlite3_int64 carrier = sqlite3_column_int(stmt, 2);
+    int32_t carrier_type = sqlite3_column_type(stmt, 2);
+    const unsigned char * hwaddr = sqlite3_column_text(stmt, 3);
+    uint32_t hwaddr_len = sqlite3_column_bytes(stmt, 3);
+    int32_t hwaddr_type = sqlite3_column_type(stmt, 3);
+
+    syslog(LOG_INFO, "%s:%d:%s: ifid=%d, name=%.*s, state=%lld, carrier=%lld", __FILE__, __LINE__, __func__, ifid, ifname_len, ifname, state, carrier);
+
+    bytes_written = snprintf(
+        (char*)payload, sizeof(payload), 
+        "{\"id\":%d",
+        ifid
+    );
+    if (-1 == bytes_written) {
+        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+    payload_len += bytes_written;
+
+    if (SQLITE_NULL != ifname_type) {
+        bytes_written = snprintf(
+            (char*)(payload + payload_len), sizeof(payload) - payload_len, 
+            ", \"name\":\"%.*s\"",
+            ifname_len, ifname
+        );
+        if (-1 == bytes_written) {
+            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+            return -1;
+        }
+        payload_len += bytes_written;
+    }
+
+    if (SQLITE_NULL != carrier_type) {
+        bytes_written = snprintf(
+            (char*)(payload + payload_len), sizeof(payload) - payload_len, 
+            ", \"carrier\":%lld",
+            carrier
+        );
+        if (-1 == bytes_written) {
+            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+            return -1;
+        }
+        payload_len += bytes_written;
+    }
+
+    if (SQLITE_NULL != state_type) {
+        bytes_written = snprintf(
+            (char*)(payload + payload_len), sizeof(payload) - payload_len, 
+            ", \"state\":%lld",
+            state
+        );
+        if (-1 == bytes_written) {
+            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+            return -1;
+        }
+        payload_len += bytes_written;
+    }
+
+    if (SQLITE_NULL != hwaddr_type) {
+        bytes_written = snprintf(
+            (char*)(payload + payload_len), sizeof(payload) - payload_len, 
+            ", \"hwaddr\":\"%.*s\"",
+            hwaddr_len, hwaddr
+        );
+        if (-1 == bytes_written) {
+            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+            return -1;
+        }
+        payload_len += bytes_written;
+    }
+
+    bytes_written = snprintf(
+        (char*)(payload + payload_len), sizeof(payload) - payload_len,
+        "}"
+    );
+    if (-1 == bytes_written) {
+        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+    payload_len += bytes_written;
+
+
+    topic_len = snprintf(
+            (char*)topic, sizeof(topic), 
+            "lnetwork.%.*s.interface.%.*s.out",
+            lnetwork->hostname_len, lnetwork->hostname,
+            ifname_len, ifname
+    );
+    if (-1 == topic_len) {
+        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    ret = pub(lnetwork, topic, topic_len, NULL, 0, payload, payload_len);
+    if (-1 == ret) {
+        syslog(LOG_ERR, "%s:%d:%s: pub returned -1", __FILE__, __LINE__, __func__);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
     return 0;
 }
 
@@ -1065,10 +1698,6 @@ int lnetwork_epoll_event_netlink_newlink (
     // see what state it's in. It's also called when a new interface is added.
 
 
-    syslog(LOG_INFO, "%s:%d:%s: interface %d just got link, type=%d, flags=%d, family=%d, running=%d",
-            __FILE__, __LINE__, __func__, ifi->ifi_index, ifi->ifi_type, ifi->ifi_flags, ifi->ifi_family, ifi->ifi_flags & IFF_RUNNING);
-
-
     ret = lnetwork_interface_add(lnetwork, ifi->ifi_index);
     if (-1 == ret) {
         syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add returned -1", __FILE__, __LINE__, __func__);
@@ -1081,7 +1710,7 @@ int lnetwork_epoll_event_netlink_newlink (
 
     // See linux/include/linux/socket.h:176 for list of definitions
     if (AF_UNSPEC == ifi->ifi_family) {
-        syslog(LOG_INFO, "%s:%d:%s: AF_UNSPEC", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: AF_UNSPEC", __FILE__, __LINE__, __func__);
     }
     else if (AF_UNIX == ifi->ifi_family) {
         syslog(LOG_INFO, "%s:%d:%s: AF_UNIX", __FILE__, __LINE__, __func__);
@@ -1099,6 +1728,7 @@ int lnetwork_epoll_event_netlink_newlink (
     struct nlattr * attr = nlattr;
     int attr_len = nlattr_len;
     for (; nla_ok(attr, attr_len); attr = nla_next(attr, &attr_len)) {
+
         if (IFLA_UNSPEC == nla_type(attr)) {
             syslog(LOG_INFO, "%s:%d:%s: unspec", __FILE__, __LINE__, __func__);
             continue;
@@ -1115,20 +1745,23 @@ int lnetwork_epoll_event_netlink_newlink (
             continue;
         }
         if (IFLA_BROADCAST == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: broadcast", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: broadcast addr", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_IFNAME == nla_type(attr)) {
+            syslog(LOG_DEBUG, "%s:%d:%s: interface=%d, name=%.*s", __FILE__, __LINE__, __func__, ifi->ifi_index, nla_len(attr), (char*)nla_data(attr));
             ret = lnetwork_interface_add_name(lnetwork, ifi->ifi_index, nla_data(attr), nla_len(attr));
             if (-1 == ret) {
                 syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_name returned -1", __FILE__, __LINE__, __func__);
                 return -1;
             }
+            if (1 == ret) {
+                notify_needed = true;
+            }
             continue;
         }
         if (IFLA_MTU == nla_type(attr)) {
             int * mtu = nla_data(attr);
-            syslog(LOG_INFO, "%s:%d:%s: mtu: %d", __FILE__, __LINE__, __func__, *mtu);
             ret = lnetwork_interface_add_mtu(lnetwork, ifi->ifi_index, *mtu);
             if (-1 == ret) {
                 syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_mtu returned -1", __FILE__, __LINE__, __func__);
@@ -1137,23 +1770,35 @@ int lnetwork_epoll_event_netlink_newlink (
             continue;
         }
         if (IFLA_LINK == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: link", __FILE__, __LINE__, __func__);
+            // for usual devices, IFLA_LINK is equal to the ifi_index. If it's
+            // a virtual interface (e.g. a tunnel), ifi_link points to the real
+            // physical interface, or it's 0, meaning it's real media is
+            // unknown (usual for ipip tunnels, when route endpoints is allowed
+            // to change).
+            uint32_t * link = nla_data(attr);
+            syslog(LOG_DEBUG, "%s:%d:%s: interface=%d, linked_interface=%d", __FILE__, __LINE__, __func__, ifi->ifi_index, *link);
+            ret = lnetwork_interface_add_link(lnetwork, ifi->ifi_index, *link);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_link returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
             continue;
         }
         if (IFLA_QDISC == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: qdisc", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: qdisc", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_STATS == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: stats", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: stats", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_STATS64 == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: stats64", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: stats64", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_AF_SPEC == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: AF_SPEC", __FILE__, __LINE__, __func__);
+            // contains nested attributes
+            //syslog(LOG_INFO, "%s:%d:%s: AF_SPEC", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_VF_PORTS == nla_type(attr)) {
@@ -1161,7 +1806,8 @@ int lnetwork_epoll_event_netlink_newlink (
             continue;
         }
         if (IFLA_GROUP == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: group", __FILE__, __LINE__, __func__);
+            uint32_t * group = nla_data(attr);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_GROUP=%d", __FILE__, __LINE__, __func__, *group);
             continue;
         }
         if (IFLA_PROMISCUITY == nla_type(attr)) {
@@ -1192,78 +1838,96 @@ int lnetwork_epoll_event_netlink_newlink (
             continue;
         }
         if (IFLA_WIRELESS == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: wireless", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: wireless", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_MAP == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: map", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: map", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_WEIGHT == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: weight", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: weight", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_OPERSTATE == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE", __FILE__, __LINE__, __func__);
-            int * operstate = nla_data(attr);
-            if (IF_OPER_UNKNOWN == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_UNKNOWN", __FILE__, __LINE__, __func__);
+            int * state = nla_data(attr);
+            ret = lnetwork_interface_add_state(lnetwork, ifi->ifi_index, *state);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_state returned -1", __FILE__, __LINE__, __func__);
+                return -1;
             }
-            if (IF_OPER_DOWN == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_DOWN", __FILE__, __LINE__, __func__);
-            }
-            if (IF_OPER_LOWERLAYERDOWN == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_LOWERLAYERDOWN", __FILE__, __LINE__, __func__);
-            }
-            if (IF_OPER_TESTING == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_TESTING", __FILE__, __LINE__, __func__);
-            }
-            if (IF_OPER_DORMANT == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_DORMANT", __FILE__, __LINE__, __func__);
-            }
-            if (IF_OPER_UP == *operstate) {
-                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_UP", __FILE__, __LINE__, __func__);
-            }
+//            if (IF_OPER_UNKNOWN == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_UNKNOWN", __FILE__, __LINE__, __func__);
+//            }
+//            if (IF_OPER_DOWN == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_DOWN", __FILE__, __LINE__, __func__);
+//            }
+//            if (IF_OPER_LOWERLAYERDOWN == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_LOWERLAYERDOWN", __FILE__, __LINE__, __func__);
+//            }
+//            if (IF_OPER_TESTING == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_TESTING", __FILE__, __LINE__, __func__);
+//            }
+//            if (IF_OPER_DORMANT == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_DORMANT", __FILE__, __LINE__, __func__);
+//            }
+//            if (IF_OPER_UP == *operstate) {
+//                syslog(LOG_INFO, "%s:%d:%s: IFLA_OPERSTATE=IF_OPER_UP", __FILE__, __LINE__, __func__);
+//            }
             continue;
         }
         if (IFLA_LINKMODE == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_LINKMODE", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_LINKMODE", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_LINKINFO == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_LINKINFO, len=%d", __FILE__, __LINE__, __func__, nla_len(attr));
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_LINKINFO, len=%d", __FILE__, __LINE__, __func__, nla_len(attr));
             continue;
         }
         if (IFLA_VLAN_ID == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_VLAN_ID", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_VLAN_ID", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_NET_NS_PID == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_NET_NS_PID, len=%d", __FILE__, __LINE__, __func__, nla_len(attr));
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_NET_NS_PID, len=%d", __FILE__, __LINE__, __func__, nla_len(attr));
             continue;
         }
         if (IFLA_NUM_TX_QUEUES == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_NUM_TX_QUEUES", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_NUM_TX_QUEUES", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_NUM_RX_QUEUES == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_NUM_RX_QUEUES", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_NUM_RX_QUEUES", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_CARRIER == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER", __FILE__, __LINE__, __func__);
+            uint8_t * carrier = nla_data(attr);
+            if (1 == *carrier) {
+                ret = lnetwork_interface_add_carrier(lnetwork, ifi->ifi_index);
+                if (-1 == ret) {
+                    syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_carrier returned -1", __FILE__, __LINE__, __func__);
+                    return -1;
+                }
+            }
+            else {
+                ret = lnetwork_interface_remove_carrier(lnetwork, ifi->ifi_index);
+                if (-1 == ret) {
+                    syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_remove_carrier returned -1", __FILE__, __LINE__, __func__);
+                    return -1;
+                }
+            }
             continue;
         }
         if (IFLA_CARRIER_CHANGES == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_CHANGES", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_CHANGES", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_CARRIER_UP_COUNT == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_UP_COUNT", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_UP_COUNT", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_IF_NETNSID == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_IF_NETNSID", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_IF_NETNSID", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_EVENT == nla_type(attr)) {
@@ -1299,134 +1963,165 @@ int lnetwork_epoll_event_netlink_newlink (
             continue;
         }
         if (IFLA_PROTO_DOWN == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_PROTO_DOWN", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_PROTO_DOWN", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_NEW_NETNSID == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_NEW_NETNSID", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_NEW_NETNSID", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_CARRIER_DOWN_COUNT == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_DOWN_COUNT", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_CARRIER_DOWN_COUNT", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_PHYS_PORT_ID == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_PHYS_PORT_ID", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_PHYS_PORT_ID", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_NEW_IFINDEX == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_NEW_IFINDEX", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_NEW_IFINDEX", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_PAD == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_PAD", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_PAD", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_XDP == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_XDP", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_XDP", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_GSO_MAX_SEGS == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_GSO_MAX_SEGS", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_GSO_MAX_SEGS", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_GSO_MAX_SIZE == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_GSO_MAX_SIZE", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: IFLA_GSO_MAX_SIZE", __FILE__, __LINE__, __func__);
             continue;
         }
         if (IFLA_MIN_MTU == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_MIN_MTU", __FILE__, __LINE__, __func__);
+            int * min_mtu = nla_data(attr);
+            syslog(LOG_DEBUG, "%s:%d:%s: interface=%d, min_mtu=%d", __FILE__, __LINE__, __func__, ifi->ifi_index, *min_mtu);
+            ret = lnetwork_interface_add_min_mtu(lnetwork, ifi->ifi_index, *min_mtu);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_min_mtu returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
             continue;
         }
         if (IFLA_MAX_MTU == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: IFLA_MAX_MTU", __FILE__, __LINE__, __func__);
+            int * max_mtu = nla_data(attr);
+            ret = lnetwork_interface_add_max_mtu(lnetwork, ifi->ifi_index, *max_mtu);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_max_mtu returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
             continue;
         }
         if (IFLA_PORT_SELF == nla_type(attr)) {
             syslog(LOG_INFO, "%s:%d:%s: IFLA_PORT_SELF", __FILE__, __LINE__, __func__);
             continue;
         }
+        if (IFLA_ALT_IFNAME == nla_type(attr)) {
+            syslog(LOG_INFO, "%s:%d:%s: IFLA_ALT_IFNAME", __FILE__, __LINE__, __func__);
+            continue;
+        }
+        if (IFLA_PROP_LIST == nla_type(attr)) {
+            struct nlattr * prop = nla_data(attr);
+            int prop_len = nla_len(attr);
+            if (!nla_ok(prop, prop_len)) {
+                syslog(LOG_ERR, "%s:%d:%s: nla_ok returned false", __FILE__, __LINE__, __func__);
+                break;
+            }
+
+            while (nla_ok(prop, prop_len)) {
+                if (IFLA_ALT_IFNAME == nla_type(prop)) {
+                    syslog(LOG_DEBUG, "%s:%d:%s: interface=%d, alt_name=%.*s", __FILE__, __LINE__, __func__, ifi->ifi_index, nla_len(prop), (char*)nla_data(prop));
+//                    ret = lnetwork_interface_add_name(lnetwork, ifi->ifi_index, nla_data(prop), nla_len(prop));
+//                    if (-1 == ret) {
+//                        syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_name returned -1", __FILE__, __LINE__, __func__);
+//                        return -1;
+//                    }
+                }
+                else {
+                    syslog(LOG_INFO, "%s:%d:%s: unknown property type %d", __FILE__, __LINE__, __func__, nla_type(prop));
+                }
+                prop = nla_next(prop, &prop_len);
+            }
+            continue;
+        }
+        if (IFLA_PERM_ADDRESS == nla_type(attr)) {
+            char buffer[64];
+            const uint8_t * addr = nla_data(attr);
+            int buffer_len = snprintf(buffer, sizeof(buffer), "%02x:%02x:%02x:%02x:%02x:%02x", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+            ret = lnetwork_interface_add_perm_addr(lnetwork, ifi->ifi_index, buffer, buffer_len);
+            if (-1 == ret) {
+                syslog(LOG_ERR, "%s:%d:%s: lnetwork_interface_add_perm_addr returned -1", __FILE__, __LINE__, __func__);
+                return -1;
+            }
+            continue;
+        }
+
         syslog(LOG_INFO, "%s:%d:%s: unknown type=%d", __FILE__, __LINE__, __func__, nla_type(attr));
     }
 
 
-
     if (IFF_UP == (IFF_UP & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: its up", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: its up", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_LOWER_UP == (IFF_LOWER_UP & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_LOWER_UP", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_LOWER_UP", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_BROADCAST == (IFF_BROADCAST & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: broadcast", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: broadcast", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_DEBUG == (IFF_DEBUG & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: debug", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: debug", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_LOOPBACK == (IFF_LOOPBACK & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: loopback", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: loopback", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_POINTOPOINT == (IFF_POINTOPOINT & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: point-to-point", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: point-to-point", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_RUNNING == (IFF_RUNNING & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: running", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: running", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_NOARP == (IFF_NOARP & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: no arp", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: no arp", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_PROMISC == (IFF_PROMISC & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: promiscuous mode", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: promiscuous mode", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_ALLMULTI == (IFF_ALLMULTI & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: allmulti", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: allmulti", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_MULTICAST == (IFF_MULTICAST & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: multicast", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: multicast", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_NOTRAILERS == (IFF_NOTRAILERS & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_NOTRAILERS", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_NOTRAILERS", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_MASTER == (IFF_MASTER & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_MASTER", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_MASTER", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_SLAVE == (IFF_SLAVE & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_SLAVE", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_SLAVE", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_PORTSEL == (IFF_PORTSEL & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_PORTSEL", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_PORTSEL", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_AUTOMEDIA == (IFF_AUTOMEDIA & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_AUTOMEDIA", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_AUTOMEDIA", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_DYNAMIC == (IFF_DYNAMIC & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_DYNAMIC", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_DYNAMIC", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_DORMANT == (IFF_DORMANT & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_DORMANT", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_DORMANT", __FILE__, __LINE__, __func__);
     }
-
     if (IFF_ECHO == (IFF_ECHO & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFF_ECHO", __FILE__, __LINE__, __func__);
+        //syslog(LOG_INFO, "%s:%d:%s: IFF_ECHO", __FILE__, __LINE__, __func__);
     }
-
 
     if (true == notify_needed) {
         ret = lnetwork_notify_interface(lnetwork, ifi->ifi_index);
@@ -1467,84 +2162,6 @@ int lnetwork_epoll_event_netlink_dellink (
         syslog(LOG_INFO, "%s:%d:%s: it was removed", __FILE__, __LINE__, __func__);
         return 0;
     }
-
-    return 0;
-
-    syslog(LOG_INFO, "%s:%d:%s: interface %d just got removed, type=%d, flags=%d, family=%d",
-            __FILE__, __LINE__, __func__, ifi->ifi_index, ifi->ifi_type, ifi->ifi_flags, ifi->ifi_family);
-
-    if (IFLA_UNSPEC == (IFLA_UNSPEC & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_UNSPEC", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_ADDRESS == (IFLA_ADDRESS & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_ADDRESS", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_BROADCAST == (IFLA_BROADCAST & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_BROADCAST", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_IFNAME == (IFLA_IFNAME & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_IFNAME", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_MTU == (IFLA_MTU & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_MTU", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_LINK == (IFLA_LINK & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_LINK", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_QDISC == (IFLA_QDISC & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_QDISC", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFLA_STATS == (IFLA_STATS & ifi->ifi_type)) {
-        syslog(LOG_INFO, "%s:%d:%s: IFLA_STATS", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_UP == (IFF_UP & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: its up", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_BROADCAST == (IFF_BROADCAST & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: broadcast", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_DEBUG == (IFF_DEBUG & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: debug", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_LOOPBACK == (IFF_LOOPBACK & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: loopback", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_POINTOPOINT == (IFF_POINTOPOINT & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: point-to-point", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_RUNNING == (IFF_RUNNING & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: running", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_NOARP == (IFF_NOARP & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: no arp", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_PROMISC == (IFF_PROMISC & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: no arp", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_ALLMULTI == (IFF_ALLMULTI & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: allmulti", __FILE__, __LINE__, __func__);
-    }
-
-    if (IFF_MULTICAST == (IFF_MULTICAST & ifi->ifi_flags)) {
-        syslog(LOG_INFO, "%s:%d:%s: multicast", __FILE__, __LINE__, __func__);
-    }
-
 
     if (true == notify_needed) {
         ret = lnetwork_notify_interface(lnetwork, ifi->ifi_index);
@@ -1621,220 +2238,220 @@ int lnetwork_epoll_event_netlink_deladdr_ipv6 (
 }
 
 
-int lnetwork_epoll_event_netlink_newaddr_ipv6 (
-    struct lnetwork_s * lnetwork,
-    struct epoll_event * event,
-    const struct nlmsghdr * const nlmsghdr,
-    const struct ifaddrmsg * const ifa,
-    uint32_t ifa_len,
-    struct in6_addr * in6_addr,
-    int in6_addr_len
-)
-{
-    int ret = 0;
-    char addr[INET6_ADDRSTRLEN];
-    char ifname[IFNAMSIZ] = {0};
-    char payload[4096];
-    int payload_len = 0;
-    uint8_t topic[512];
-    int topic_len = 0;
-    int bytes_written = 0;
-    sqlite3_stmt * stmt;
-
-
-    // get ip as a printable string
-    if (NULL == inet_ntop(AF_INET6, in6_addr, addr, INET6_ADDRSTRLEN)) {
-        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
-    }
-
-
-
-    // for now, just don't handle temporary addresses. TODO: create a new table
-    // for temporaries, or do something smart with them.
-    if (IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
-        return 0;
-    }
-
-
-
-    // prepare sqlite3 statement
-    const char sql[] = "insert into ipv6(ifid, ipv6addr) values (?,?) on conflict(ifid,ipv6addr) do nothing returning ifid";
-    ret = sqlite3_prepare_v3(
-        /* db = */ lnetwork->db,
-        /* sql = */ sql,
-        /* sql_len = */ sizeof(sql),
-        /* flags = */ SQLITE_PREPARE_NORMALIZE,
-        /* &stmt = */ &stmt,
-        /* &sql_end = */ NULL
-    );
-    if (SQLITE_OK != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
-        return -1;
-    }
-
-
-    // bind ifid
-    ret = sqlite3_bind_int(
-        /* stmt = */ stmt,
-        /* index = */ 1,
-        /* int = */ ifa->ifa_index
-    );
-    if (-1 == ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
-        return -1;
-    }
-
-    // bind ifname
+//int lnetwork_epoll_event_netlink_newaddr_ipv6 (
+//    struct lnetwork_s * lnetwork,
+//    struct epoll_event * event,
+//    const struct nlmsghdr * const nlmsghdr,
+//    const struct ifaddrmsg * const ifa,
+//    uint32_t ifa_len,
+//    struct in6_addr * in6_addr,
+//    int in6_addr_len
+//)
+//{
+//    int ret = 0;
+//    char addr[INET6_ADDRSTRLEN];
+//    char ifname[IFNAMSIZ] = {0};
+//    char payload[4096];
+//    int payload_len = 0;
+//    uint8_t topic[512];
+//    int topic_len = 0;
+//    int bytes_written = 0;
+//    sqlite3_stmt * stmt;
+//
+//
+//    // get ip as a printable string
+//    if (NULL == inet_ntop(AF_INET6, in6_addr, addr, INET6_ADDRSTRLEN)) {
+//        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
+//        return -1;
+//    }
+//
+//
+//
+//    // for now, just don't handle temporary addresses. TODO: create a new table
+//    // for temporaries, or do something smart with them.
+//    if (IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
+//        return 0;
+//    }
+//
+//
+//
+//    // prepare sqlite3 statement
+//    const char sql[] = "insert into ipv6(ifid, ipv6addr) values (?,?) on conflict(ifid,ipv6addr) do nothing returning ifid";
+//    ret = sqlite3_prepare_v3(
+//        /* db = */ lnetwork->db,
+//        /* sql = */ sql,
+//        /* sql_len = */ sizeof(sql),
+//        /* flags = */ SQLITE_PREPARE_NORMALIZE,
+//        /* &stmt = */ &stmt,
+//        /* &sql_end = */ NULL
+//    );
+//    if (SQLITE_OK != ret) {
+//        syslog(LOG_ERR, "%s:%d:%s: sqlite3_prepare_v3 returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+//        return -1;
+//    }
+//
+//
+//    // bind ifid
+//    ret = sqlite3_bind_int(
+//        /* stmt = */ stmt,
+//        /* index = */ 1,
+//        /* int = */ ifa->ifa_index
+//    );
+//    if (-1 == ret) {
+//        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_int returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+//        return -1;
+//    }
+//
+//    // bind ifname
+////    ret = sqlite3_bind_text(
+////        /* stmt = */ stmt,
+////        /* index = */ 2,
+////        /* text = */ ifname,
+////        /* text_len = */ sizeof(ifname),
+////        /* mem_cb = */ SQLITE_STATIC
+////    );
+////    if (-1 == ret) {
+////        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
+////        return -1;
+////    }
+//
+//    // bind ipv6addr
 //    ret = sqlite3_bind_text(
 //        /* stmt = */ stmt,
-//        /* index = */ 2,
-//        /* text = */ ifname,
-//        /* text_len = */ sizeof(ifname),
+//        /* index = */ 3,
+//        /* text = */ addr,
+//        /* text_len = */ sizeof(addr),
 //        /* mem_cb = */ SQLITE_STATIC
 //    );
 //    if (-1 == ret) {
 //        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
 //        return -1;
 //    }
-
-    // bind ipv6addr
-    ret = sqlite3_bind_text(
-        /* stmt = */ stmt,
-        /* index = */ 3,
-        /* text = */ addr,
-        /* text_len = */ sizeof(addr),
-        /* mem_cb = */ SQLITE_STATIC
-    );
-    if (-1 == ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_bind_text returned %d: %s", __FILE__, __LINE__, __func__, ret, sqlite3_errmsg(lnetwork->db));
-        return -1;
-    }
-
-
-    ret = sqlite3_step(stmt);
-    if (SQLITE_DONE == ret) {
-        // we're done - this is not a new ip address, no need to notify anyone.
-        syslog(LOG_INFO, "%s:%d:%s: its an old ipv6 addr", __FILE__, __LINE__, __func__);
-        sqlite3_finalize(stmt);
-        return 0;
-    }
-    if (SQLITE_ROW == ret) {
-        syslog(LOG_INFO, "%s:%d:%s: it's a new ipv6 addr", __FILE__, __LINE__, __func__);
-        // this is a new address, let's notify people.
-    }
-
-
-    topic_len = snprintf((char*)topic, sizeof(topic), "lnetwork.%.*s.interface.%s.out", lnetwork->hostname_len, lnetwork->hostname, ifname);
-    if (-1 == topic_len) {
-        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-        return -1;
-    }
-
-
-
-    payload_len = snprintf(payload, sizeof(payload), "{\"address\":\"%s\"", addr);
-    if (-1 == payload_len) {
-        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-        return -1;
-    }
-
-
-    if (IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"temporary\":true");
-        if (-1 == bytes_written) {
-            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-            return -1;
-        }
-        payload_len += bytes_written;
-    }
-    if (IFA_F_PERMANENT == (IFA_F_PERMANENT & ifa->ifa_flags)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"permanent\":true");
-        if (-1 == bytes_written) {
-            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-            return -1;
-        }
-        payload_len += bytes_written;
-    }
-    if (IFA_F_TENTATIVE == (IFA_F_TENTATIVE & ifa->ifa_flags)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"tentative\":true");
-        if (-1 == bytes_written) {
-            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-            return -1;
-        }
-        payload_len += bytes_written;
-    }
-
-
-    if (RT_SCOPE_LINK == (RT_SCOPE_LINK & ifa->ifa_scope)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"link\"");
-        if (-1 == bytes_written) {
-            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-            return -1;
-        }
-        payload_len += bytes_written;
-    }
-    else if (RT_SCOPE_UNIVERSE == (RT_SCOPE_UNIVERSE & ifa->ifa_scope)) {
-        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"global\"");
-        if (-1 == bytes_written) {
-            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-            return -1;
-        }
-        payload_len += bytes_written;
-    }
-
-
-    bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, "}");
-    if (-1 == bytes_written) {
-        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
-        return -1;
-    }
-    payload_len += bytes_written;
-
-
-    ret = pub(
-        /* lnetwork = */ lnetwork,
-        /* topic = */ topic,
-        /* topic_len = */ topic_len,
-        /* rt = */ NULL,
-        /* rt_len = */ 0,
-        /* payload = */ (uint8_t*)payload,
-        /* payload_len = */ payload_len
-    );
-    if (-1 == ret) {
-        syslog(LOG_ERR, "%s:%d:%s: pub returned -1", __FILE__, __LINE__, __func__);
-        return -1;
-    }
+//
+//
+//    ret = sqlite3_step(stmt);
+//    if (SQLITE_DONE == ret) {
+//        // we're done - this is not a new ip address, no need to notify anyone.
+//        syslog(LOG_INFO, "%s:%d:%s: its an old ipv6 addr", __FILE__, __LINE__, __func__);
+//        sqlite3_finalize(stmt);
+//        return 0;
+//    }
+//    if (SQLITE_ROW == ret) {
+//        syslog(LOG_INFO, "%s:%d:%s: it's a new ipv6 addr", __FILE__, __LINE__, __func__);
+//        // this is a new address, let's notify people.
+//    }
+//
+//
+//    topic_len = snprintf((char*)topic, sizeof(topic), "lnetwork.%.*s.interface.%s.out", lnetwork->hostname_len, lnetwork->hostname, ifname);
+//    if (-1 == topic_len) {
+//        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//        return -1;
+//    }
+//
+//
+//
+//    payload_len = snprintf(payload, sizeof(payload), "{\"address\":\"%s\"", addr);
+//    if (-1 == payload_len) {
+//        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//        return -1;
+//    }
+//
+//
+//    if (IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
+//        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"temporary\":true");
+//        if (-1 == bytes_written) {
+//            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//            return -1;
+//        }
+//        payload_len += bytes_written;
+//    }
+//    if (IFA_F_PERMANENT == (IFA_F_PERMANENT & ifa->ifa_flags)) {
+//        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"permanent\":true");
+//        if (-1 == bytes_written) {
+//            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//            return -1;
+//        }
+//        payload_len += bytes_written;
+//    }
+//    if (IFA_F_TENTATIVE == (IFA_F_TENTATIVE & ifa->ifa_flags)) {
+//        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"tentative\":true");
+//        if (-1 == bytes_written) {
+//            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//            return -1;
+//        }
+//        payload_len += bytes_written;
+//    }
+//
+//
+//    if (RT_SCOPE_LINK == (RT_SCOPE_LINK & ifa->ifa_scope)) {
+//        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"link\"");
+//        if (-1 == bytes_written) {
+//            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//            return -1;
+//        }
+//        payload_len += bytes_written;
+//    }
+//    else if (RT_SCOPE_UNIVERSE == (RT_SCOPE_UNIVERSE & ifa->ifa_scope)) {
+//        bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, ",\"scope\":\"global\"");
+//        if (-1 == bytes_written) {
+//            syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//            return -1;
+//        }
+//        payload_len += bytes_written;
+//    }
+//
+//
+//    bytes_written = snprintf(payload + payload_len, sizeof(payload) - payload_len, "}");
+//    if (-1 == bytes_written) {
+//        syslog(LOG_ERR, "%s:%d:%s: snprintf returned -1", __FILE__, __LINE__, __func__);
+//        return -1;
+//    }
+//    payload_len += bytes_written;
+//
+//
+//    ret = pub(
+//        /* lnetwork = */ lnetwork,
+//        /* topic = */ topic,
+//        /* topic_len = */ topic_len,
+//        /* rt = */ NULL,
+//        /* rt_len = */ 0,
+//        /* payload = */ (uint8_t*)payload,
+//        /* payload_len = */ payload_len
+//    );
+//    if (-1 == ret) {
+//        syslog(LOG_ERR, "%s:%d:%s: pub returned -1", __FILE__, __LINE__, __func__);
+//        return -1;
+//    }
+//
+//
+//    return 0;
+//}
 
 
-    return 0;
-}
-
-
-int lnetwork_epoll_event_netlink_newaddr_ipv4 (
-    struct lnetwork_s * lnetwork,
-    struct epoll_event * event,
-    const struct nlmsghdr * const nlmsghdr,
-    const struct ifaddrmsg * const ifa,
-    int ifa_len,
-    struct in_addr * in_addr,
-    int in_addr_len
-)
-{
-    int ret = 0;
-    char addr[INET_ADDRSTRLEN];
-    char name[IFNAMSIZ] = {0};
-
-    if (NULL == inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN)) {
-        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
-        return -1;
-    }
-
-    syslog(LOG_INFO, "%s:%d:%s: interface %d (%s) just got addr %s",
-            __FILE__, __LINE__, __func__, ifa->ifa_index, name, addr);
-
-    return 0;
-}
+//int lnetwork_epoll_event_netlink_newaddr_ipv4 (
+//    struct lnetwork_s * lnetwork,
+//    struct epoll_event * event,
+//    const struct nlmsghdr * const nlmsghdr,
+//    const struct ifaddrmsg * const ifa,
+//    int ifa_len,
+//    struct in_addr * in_addr,
+//    int in_addr_len
+//)
+//{
+//    int ret = 0;
+//    char addr[INET_ADDRSTRLEN];
+//    char name[IFNAMSIZ] = {0};
+//
+//    if (NULL == inet_ntop(AF_INET, in_addr, addr, INET_ADDRSTRLEN)) {
+//        syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
+//        return -1;
+//    }
+//
+//    syslog(LOG_INFO, "%s:%d:%s: interface %d (%s) just got addr %s",
+//            __FILE__, __LINE__, __func__, ifa->ifa_index, name, addr);
+//
+//    return 0;
+//}
 
 
 int lnetwork_epoll_event_netlink_deladdr_ipv4 (
@@ -1882,11 +2499,14 @@ int lnetwork_epoll_event_netlink_newaddr (
     int attr_len = nlattr_len;
     while (1) {
 
-        if (IFA_LOCAL == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: local", __FILE__, __LINE__, __func__);
+        // for point-to-point interfaces, the IFA_ADDRESS is the destination
+        // address. For other interfaces, it's the local interface address.
+        if (IFA_ADDRESS == nla_type(attr)) {
+            //syslog(LOG_INFO, "%s:%d:%s: prefix address", __FILE__, __LINE__, __func__);
         }
 
-        else if (IFA_ADDRESS == nla_type(attr) && AF_INET6 == ifa->ifa_family && IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
+        else if (IFA_LOCAL == nla_type(attr) && AF_INET6 == ifa->ifa_family && IFA_F_TEMPORARY == (IFA_F_TEMPORARY & ifa->ifa_flags)) {
+#ifdef DEBUG
             char addr[INET6_ADDRSTRLEN];
             // get ip as a printable string
             if (NULL == inet_ntop(AF_INET6, nla_data(attr), addr, INET6_ADDRSTRLEN)) {
@@ -1894,9 +2514,10 @@ int lnetwork_epoll_event_netlink_newaddr (
                 return -1;
             }
             syslog(LOG_INFO, "%s:%d:%s: temporary ipv6 address=%s", __FILE__, __LINE__, __func__, addr);
+#endif
         }
 
-        else if (IFA_ADDRESS == nla_type(attr) && AF_INET6 == ifa->ifa_family && IFA_F_TENTATIVE == (IFA_F_TENTATIVE & ifa->ifa_flags)) {
+        else if (IFA_LOCAL == nla_type(attr) && AF_INET6 == ifa->ifa_family && IFA_F_TENTATIVE == (IFA_F_TENTATIVE & ifa->ifa_flags)) {
             char addr[INET6_ADDRSTRLEN];
             // get ip as a printable string
             if (NULL == inet_ntop(AF_INET6, nla_data(attr), addr, INET6_ADDRSTRLEN)) {
@@ -1914,7 +2535,6 @@ int lnetwork_epoll_event_netlink_newaddr (
                 syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
                 return -1;
             }
-            syslog(LOG_INFO, "%s:%d:%s: ipv6 address=%s", __FILE__, __LINE__, __func__, addr);
 
             ret = lnetwork_interface_add_ipv6(lnetwork, ifa->ifa_index, addr, INET6_ADDRSTRLEN);
             if (-1 == ret) {
@@ -1927,14 +2547,12 @@ int lnetwork_epoll_event_netlink_newaddr (
 
         }
 
-        else if (IFA_ADDRESS == nla_type(attr) && AF_INET == ifa->ifa_family) {
+        else if (IFA_LOCAL == nla_type(attr) && AF_INET == ifa->ifa_family) {
             char addr[INET_ADDRSTRLEN];
             if (NULL == inet_ntop(AF_INET, nla_data(attr), addr, INET_ADDRSTRLEN)) {
                 syslog(LOG_ERR, "%s:%d:%s: inet_ntop: %s", __FILE__, __LINE__, __func__, strerror(errno));
                 return -1;
             }
-
-            syslog(LOG_INFO, "%s:%d:%s: interface=%d, addr=%s", __FILE__, __LINE__, __func__, ifa->ifa_index, addr);
 
             ret = lnetwork_interface_add_ipv4(lnetwork, ifa->ifa_index, addr, INET_ADDRSTRLEN);
             if (-1 == ret) {
@@ -1947,15 +2565,36 @@ int lnetwork_epoll_event_netlink_newaddr (
         }
 
         else if (IFA_LABEL == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: label", __FILE__, __LINE__, __func__);
+            // the label (network interface name) is already in the database, not adding it here again
+            char * label = nla_data(attr);
+            syslog(LOG_DEBUG, "%s:%d:%s: interface=%d, label=%.*s", __FILE__, __LINE__, __func__, ifa->ifa_index, IFNAMSIZ, label);
         }
 
         else if (IFA_BROADCAST == nla_type(attr)) {
-            syslog(LOG_INFO, "%s:%d:%s: broadcast addr", __FILE__, __LINE__, __func__);
+            //syslog(LOG_INFO, "%s:%d:%s: broadcast addr", __FILE__, __LINE__, __func__);
         }
 
         else if (IFA_ANYCAST == nla_type(attr)) {
             syslog(LOG_INFO, "%s:%d:%s: anycast addr", __FILE__, __LINE__, __func__);
+        }
+
+        else if (IFA_CACHEINFO == nla_type(attr)) {
+            //struct ifa_cacheinfo * ci = nla_data(attr);
+            //syslog(LOG_INFO, "%s:%d:%s: IFA_CACHEINFO, ci.prefered=%d, ci.valid=%d", __FILE__, __LINE__, __func__, ci->ifa_prefered, ci->ifa_valid);
+        }
+
+        else if (IFA_FLAGS == nla_type(attr)) {
+            uint32_t * flags = nla_data(attr);
+            //syslog(LOG_INFO, "%s:%d:%s: IFA_FLAGS=%d, ifa->ifa_flags=%d", __FILE__, __LINE__, __func__, *flags, ifa->ifa_flags);
+        }
+
+        else if (IFA_RT_PRIORITY == nla_type(attr)) {
+            uint32_t * flags = nla_data(attr);
+            syslog(LOG_INFO, "%s:%d:%s: IFA_RT_PRIORITY=%d", __FILE__, __LINE__, __func__, *flags);
+        }
+
+        else {
+            syslog(LOG_INFO, "%s:%d:%s: unknown nla type %d", __FILE__, __LINE__, __func__, nla_type(attr));
         }
 
 
@@ -2085,8 +2724,6 @@ int lnetwork_epoll_event_netlink (
     int bytes_read = 0;
     struct nlmsghdr * nlmsghdr;
 
-    syslog(LOG_DEBUG, "%s:%d:%s: hi!", __FILE__, __LINE__, __func__);
-
     bytes_read = read(lnetwork->netlinkfd, buf, sizeof(buf));
     if (-1 == bytes_read) {
         syslog(LOG_ERR, "%s:%d:%s: read: %s", __FILE__, __LINE__, __func__, strerror(errno));
@@ -2118,7 +2755,20 @@ int lnetwork_epoll_event_netlink (
                     return -1;
                 }
             }
-            syslog(LOG_INFO, "%s:%d:%s: done", __FILE__, __LINE__, __func__);
+            if (true == lnetwork->queried_link && true == lnetwork->queried_addr) {
+                char * err = NULL;
+                ret = sqlite3_exec(
+                    /* db = */ lnetwork->db,
+                    /* sqlite = */ "pragma foreign_keys=1;",
+                    /* cb = */ NULL,
+                    /* user_data = */ NULL,
+                    /* err = */ &err
+                );
+                if (SQLITE_OK != ret) {
+                    syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s", __FILE__, __LINE__, __func__, ret, err);
+                    return -1;
+                }
+            }
             break;
         }
 
@@ -2768,53 +3418,6 @@ int lnetwork_nats_event_request (
         return -1;
     }
 
-    syslog(LOG_INFO, "%s:%d:%s: got request", __FILE__, __LINE__, __func__);
-
-    char * debug_sql =
-        "select * from interfaces natural left join names natural left join ipv6 natural left join ipv4 natural left join mtu natural left join txqlen natural left join promisuous natural left join hwaddr;";
-    ret = sqlite3_exec(
-        /* db = */ lnetwork->db,
-        /* sql = */ debug_sql,
-        /* cb = */ sqlite3_exec_print,
-        /* user_data = */ NULL,
-        /* err = */ &debug_err
-    );
-    if (SQLITE_OK != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s",
-            __FILE__, __LINE__, __func__, ret, debug_err);
-        sqlite3_free(debug_err);
-    }
-
-    debug_sql =
-        "select * from ipv4;";
-    ret = sqlite3_exec(
-        /* db = */ lnetwork->db,
-        /* sql = */ debug_sql,
-        /* cb = */ sqlite3_exec_print,
-        /* user_data = */ NULL,
-        /* err = */ &debug_err
-    );
-    if (SQLITE_OK != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s",
-            __FILE__, __LINE__, __func__, ret, debug_err);
-        sqlite3_free(debug_err);
-    }
-
-    debug_sql =
-        "select * from names;";
-    ret = sqlite3_exec(
-        /* db = */ lnetwork->db,
-        /* sql = */ debug_sql,
-        /* cb = */ sqlite3_exec_print,
-        /* user_data = */ NULL,
-        /* err = */ &debug_err
-    );
-    if (SQLITE_OK != ret) {
-        syslog(LOG_ERR, "%s:%d:%s: sqlite3_exec returned %d: %s",
-            __FILE__, __LINE__, __func__, ret, debug_err);
-        sqlite3_free(debug_err);
-    }
-
     db_p = sqlite3_serialize(
         /* sqlite3 = */ lnetwork->db,
         /* db = */ "main",
@@ -2942,7 +3545,7 @@ int lnetwork_init_sqlite (
 
     ret = sqlite3_exec(
         /* db = */ lnetwork->db,
-        /* sqlite = */ "pragma foreign_keys=1;",
+        /* sqlite = */ "pragma foreign_keys=0;",
         /* cb = */ NULL,
         /* user_data = */ NULL,
         /* err = */ &err
@@ -2977,6 +3580,8 @@ int main (
     struct lnetwork_s lnetwork = {0};
 
     openlog("lnetwork", LOG_NDELAY | LOG_PERROR, LOG_USER);
+
+    setlogmask(LOG_UPTO(LOG_DEBUG));
 
     ret = lnetwork_init(&lnetwork);
     if (-1 == ret) {
